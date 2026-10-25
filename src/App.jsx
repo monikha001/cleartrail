@@ -176,19 +176,46 @@ function openEvidenceDB() {
   });
 }
 
+async function hashEvidenceFile(file) {
+  if (!globalThis.crypto?.subtle) {
+    throw new Error("SHA-256 is unavailable in this browser.");
+  }
+
+  const buffer = await file.arrayBuffer();
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    buffer
+  );
+
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 async function saveEvidenceFiles(caseId, files) {
   const db = await openEvidenceDB();
   const createdAt = new Date().toISOString();
+  const batchId = Date.now();
 
-  const attachments = files.map((file, index) => ({
-    id: `${caseId}-${Date.now()}-${index}`,
-    caseId,
-    name: file.name,
-    type: file.type || "application/octet-stream",
-    size: file.size,
-    addedAt: createdAt,
-    blob: file,
-  }));
+  let attachments;
+
+  try {
+    attachments = await Promise.all(
+      files.map(async (file, index) => ({
+        id: `${caseId}-${batchId}-${index}`,
+        caseId,
+        name: file.name,
+        type: file.type || "application/octet-stream",
+        size: file.size,
+        addedAt: createdAt,
+        sha256: await hashEvidenceFile(file),
+        blob: file,
+      }))
+    );
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(
@@ -198,13 +225,10 @@ async function saveEvidenceFiles(caseId, files) {
 
     const store = transaction.objectStore(EVIDENCE_STORE_NAME);
 
-    attachments.forEach((attachment) => {
-      store.put(attachment);
-    });
+    attachments.forEach((attachment) => store.put(attachment));
 
     transaction.oncomplete = () => {
       db.close();
-
       resolve(
         attachments.map(({ blob, ...metadata }) => metadata)
       );
@@ -217,11 +241,13 @@ async function saveEvidenceFiles(caseId, files) {
 
     transaction.onabort = () => {
       db.close();
-      reject(transaction.error || new Error("Evidence saving was cancelled."));
+      reject(
+        transaction.error ||
+          new Error("Evidence saving was cancelled.")
+      );
     };
   });
 }
-
 async function loadEvidenceFiles(caseId) {
   const db = await openEvidenceDB();
 
@@ -265,6 +291,7 @@ function App() {
   const [formData, setFormData] = useState(EMPTY_FORM);
   const [selectedEvidenceFiles, setSelectedEvidenceFiles] = useState([]);
 const [caseAttachments, setCaseAttachments] = useState([]);
+const [evidenceChecks, setEvidenceChecks] = useState({});
 const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [selectedCase, setSelectedCase] = useState(null);
   const [notice, setNotice] = useState("");
@@ -361,6 +388,64 @@ function downloadEvidenceFile(attachment) {
   link.remove();
 
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+async function verifyEvidenceAttachment(attachment) {
+  if (!attachment?.blob) {
+    setEvidenceChecks((previous) => ({
+      ...previous,
+      [attachment.id]: {
+        status: "error",
+        message: "The stored file could not be loaded.",
+      },
+    }));
+    return;
+  }
+
+  if (!attachment.sha256) {
+    setEvidenceChecks((previous) => ({
+      ...previous,
+      [attachment.id]: {
+        status: "unverified",
+        message:
+          "No fingerprint was saved for this older attachment. Upload the file again in a new complaint to create one.",
+      },
+    }));
+    return;
+  }
+
+  setEvidenceChecks((previous) => ({
+    ...previous,
+    [attachment.id]: {
+      status: "checking",
+      message: "Checking file contents...",
+    },
+  }));
+
+  try {
+    const actualHash = await hashEvidenceFile(attachment.blob);
+    const matches = actualHash === attachment.sha256;
+
+    setEvidenceChecks((previous) => ({
+      ...previous,
+      [attachment.id]: {
+        status: matches ? "verified" : "mismatch",
+        message: matches
+          ? "File integrity verified. Its contents match the saved fingerprint."
+          : "Integrity warning. The file contents do not match the saved fingerprint.",
+        hash: actualHash,
+      },
+    }));
+  } catch (error) {
+    console.error("Evidence verification failed:", error);
+
+    setEvidenceChecks((previous) => ({
+      ...previous,
+      [attachment.id]: {
+        status: "error",
+        message: "Could not verify this file in the current browser.",
+      },
+    }));
+  }
 }
   function toggleEvidence(item) {
     setFormData((previous) => ({
@@ -1222,22 +1307,49 @@ function restoreTimelineAfterDemo() {
   ) : caseAttachments.length > 0 ? (
     <ul className="saved-attachment-list">
       {caseAttachments.map((attachment) => (
-        <li key={attachment.id}>
-          <span>
-            <strong>{attachment.name}</strong>
-            <small>
-              {(attachment.size / 1024).toFixed(0)} KB
-            </small>
-          </span>
+        <li key={attachment.id} className="saved-attachment-item">
+  <div className="saved-attachment-info">
+    <strong>{attachment.name}</strong>
+    <small>{(attachment.size / 1024).toFixed(0)} KB</small>
+  </div>
 
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={() => downloadEvidenceFile(attachment)}
-          >
-            Download ↓
-          </button>
-        </li>
+  <div className="saved-attachment-actions">
+    <button
+      type="button"
+      className="secondary-button"
+      onClick={() => verifyEvidenceAttachment(attachment)}
+      disabled={evidenceChecks[attachment.id]?.status === "checking"}
+    >
+      {evidenceChecks[attachment.id]?.status === "checking"
+        ? "Checking..."
+        : "Verify file"}
+    </button>
+
+    <button
+      type="button"
+      className="secondary-button"
+      onClick={() => downloadEvidenceFile(attachment)}
+    >
+      Download ↓
+    </button>
+  </div>
+
+  {evidenceChecks[attachment.id] && (
+    <div
+      className={`evidence-check-result ${evidenceChecks[attachment.id].status}`}
+      role="status"
+    >
+      {evidenceChecks[attachment.id].message}
+
+      {evidenceChecks[attachment.id].status === "verified" &&
+        attachment.sha256 && (
+          <small className="fingerprint-text">
+            SHA-256: {attachment.sha256}
+          </small>
+        )}
+    </div>
+  )}
+</li>
       ))}
     </ul>
   ) : (

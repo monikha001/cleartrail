@@ -1792,3 +1792,64 @@ h4 {
     flex-direction: column;
   }
 }
+/* ===== Evidence file integrity results ===== */
+
+.saved-attachment-list .saved-attachment-item {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.saved-attachment-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+
+.saved-attachment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.evidence-check-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 13px;
+  border: 1px solid #dce5f4;
+  border-radius: 12px;
+  background: #f7f9fd;
+  color: #30466a;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.evidence-check-result.verified {
+  border-color: #bce8cd;
+  background: #edf9f1;
+  color: #246d43;
+}
+
+.evidence-check-result.mismatch,
+.evidence-check-result.error {
+  border-color: #f0b9b9;
+  background: #fff0f0;
+  color: #9e3030;
+}
+
+.evidence-check-result.unverified {
+  border-color: #f0d9a7;
+  background: #fff8e9;
+  color: #805400;
+}
+
+.fingerprint-text {
+  font-family: monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
