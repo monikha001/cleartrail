@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { supabase } from "./supabaseClient";
 import "./App.css";
 
 const DEMO_CASES = [
@@ -75,7 +76,7 @@ async function buildHashChain(events) {
   for (const event of events) {
     const payload = JSON.stringify({
       id: event.id,
-      date: event.date,
+      date: event.date ? new Date(event.date).toISOString() : event.date,
       title: event.title,
       details: event.details,
       previousHash,
@@ -123,7 +124,7 @@ async function verifyHashChain(events) {
   for (const event of events) {
     const payload = JSON.stringify({
       id: event.id,
-      date: event.date,
+      date: event.date ? new Date(event.date).toISOString() : event.date,
       title: event.title,
       details: event.details,
       previousHash,
@@ -276,74 +277,168 @@ async function loadEvidenceFiles(caseId) {
     };
   });
 }
-function loadSavedCases() {
+function loadSavedCases(storageKey = "cleartrailSavedCases") {
   try {
-    const stored = localStorage.getItem("cleartrailSavedCases");
+    const stored = localStorage.getItem(storageKey);
     return stored ? JSON.parse(stored) : [];
   } catch {
     return [];
   }
 }
 
-function App() {
+function App({ userId = null, storageKey = "cleartrailSavedCases" } = {}) {
   const [view, setView] = useState("home");
-  const [savedCases, setSavedCases] = useState(loadSavedCases);
+  const [savedCases, setSavedCases] = useState(() =>
+    userId ? [] : loadSavedCases(storageKey)
+  );
   const [formData, setFormData] = useState(EMPTY_FORM);
   const [selectedEvidenceFiles, setSelectedEvidenceFiles] = useState([]);
-const [caseAttachments, setCaseAttachments] = useState([]);
-const [evidenceChecks, setEvidenceChecks] = useState({});
-const [evidenceLoading, setEvidenceLoading] = useState(false);
+  const [caseAttachments, setCaseAttachments] = useState([]);
+  const [evidenceChecks, setEvidenceChecks] = useState({});
+  const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [selectedCase, setSelectedCase] = useState(null);
   const [notice, setNotice] = useState("");
-  const [eventTitle, setEventTitle] = useState(
-  "Follow-up action recorded"
-);
-const [eventDetails, setEventDetails] = useState("");
-const [integrityResult, setIntegrityResult] = useState(null);
-const [tamperDemoActive, setTamperDemoActive] = useState(false);
+  const [eventTitle, setEventTitle] = useState("Follow-up action recorded");
+  const [eventDetails, setEventDetails] = useState("");
+  const [integrityResult, setIntegrityResult] = useState(null);
+  const [tamperDemoActive, setTamperDemoActive] = useState(false);
+  const [draftType, setDraftType] = useState("reminder");
+  const [actionDraft, setActionDraft] = useState("");
 
   const allCases = [...savedCases, ...DEMO_CASES];
   const overdueCases = savedCases.filter(isFollowUpOverdue);
-  const [draftType, setDraftType] = useState("reminder");
-const [actionDraft, setActionDraft] = useState("");
+
+  // Demo Mode uses its own local-storage key. Signed-in records are read from Supabase.
   useEffect(() => {
-    localStorage.setItem(
-      "cleartrailSavedCases",
-      JSON.stringify(savedCases)
-    );
-  }, [savedCases]);
+    if (userId) return;
+
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(savedCases));
+    } catch (error) {
+      console.error("Could not save local complaint records:", error);
+      setNotice("Could not save records in this browser. Check available storage.");
+    }
+  }, [savedCases, storageKey, userId]);
+
   useEffect(() => {
-  setTamperDemoActive(false);
-  setIntegrityResult(null);
-}, [selectedCase?.id]);
- useEffect(() => {
-  let active = true;
+    if (!userId) return;
 
-  if (!selectedCase?.id || selectedCase.isDemo) {
-    setCaseAttachments([]);
-    setEvidenceLoading(false);
-    return;
-  }
+    let cancelled = false;
 
-  setEvidenceLoading(true);
+    async function loadCloudCases() {
+      const [complaintsResult, eventsResult] = await Promise.all([
+        supabase
+          .from("complaints")
+          .select("*")
+          .eq("owner_id", userId)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("case_events")
+          .select("*")
+          .eq("owner_id", userId)
+          .order("event_date", { ascending: true }),
+      ]);
 
-  loadEvidenceFiles(selectedCase.id)
-    .then((files) => {
-      if (active) setCaseAttachments(files);
-    })
-    .catch((error) => {
-      console.error("Could not load evidence files:", error);
+      if (cancelled) return;
 
-      if (active) setCaseAttachments([]);
-    })
-    .finally(() => {
-      if (active) setEvidenceLoading(false);
+      if (complaintsResult.error) {
+        console.error("Could not load cloud complaints:", complaintsResult.error);
+        setNotice("Could not load your cloud complaints. Please refresh or sign in again.");
+        return;
+      }
+
+      const eventsByCase = new Map();
+      if (eventsResult.error) {
+        console.error("Could not load cloud timeline events:", eventsResult.error);
+      } else {
+        for (const row of eventsResult.data ?? []) {
+          const existing = eventsByCase.get(row.case_id) ?? [];
+          existing.push({
+            id: row.id,
+            date: row.event_date ? new Date(row.event_date).toISOString() : "",
+            title: row.title,
+            details: row.details ?? "",
+            previousHash: row.previous_hash ?? null,
+            hash: row.hash ?? null,
+          });
+          eventsByCase.set(row.case_id, existing);
+        }
+      }
+
+      const cloudCases = (complaintsResult.data ?? []).map((row) => ({
+        id: row.id,
+        title: row.title,
+        category: row.category,
+        authority: row.authority,
+        location: row.location,
+        incidentDate: row.incident_date ?? "",
+        description: row.description,
+        deadline: row.follow_up_date ?? "",
+        status: row.status ?? "Personal record saved",
+        evidence: row.evidence_checklist ?? [],
+        createdAt: row.created_at
+          ? new Date(row.created_at).toLocaleDateString("en-IN")
+          : "",
+        isDemo: false,
+        events: eventsByCase.get(row.id) ?? [],
+        // Evidence file bytes are still local-only until private Supabase Storage is connected.
+        attachments: [],
+      }));
+
+      setSavedCases(cloudCases);
+      setNotice(
+        eventsResult.error
+          ? "Complaints loaded, but their timeline could not be loaded. Please refresh."
+          : ""
+      );
+    }
+
+    loadCloudCases().catch((error) => {
+      console.error("Cloud loading failed:", error);
+      if (!cancelled) {
+        setNotice("Could not load your cloud records. Please refresh and try again.");
+      }
     });
 
-  return () => {
-    active = false;
-  };
-}, [selectedCase?.id, selectedCase?.isDemo]);
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  useEffect(() => {
+    setTamperDemoActive(false);
+    setIntegrityResult(null);
+  }, [selectedCase?.id]);
+
+  useEffect(() => {
+    let active = true;
+
+    if (!selectedCase?.id || selectedCase.isDemo || userId) {
+      setCaseAttachments([]);
+      setEvidenceLoading(false);
+      return () => {
+        active = false;
+      };
+    }
+
+    setEvidenceLoading(true);
+
+    loadEvidenceFiles(selectedCase.id)
+      .then((files) => {
+        if (active) setCaseAttachments(files);
+      })
+      .catch((error) => {
+        console.error("Could not load evidence files:", error);
+        if (active) setCaseAttachments([]);
+      })
+      .finally(() => {
+        if (active) setEvidenceLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [selectedCase?.id, selectedCase?.isDemo, userId]);
 
   function updateField(event) {
     const { name, value } = event.target;
@@ -457,64 +552,127 @@ async function verifyEvidenceAttachment(attachment) {
   }
 
   async function saveComplaint(event) {
-  event.preventDefault();
+    event.preventDefault();
 
-  try {
-    const now = new Date();
+    try {
+      const now = new Date();
+      const caseId = `CT-${Date.now()}-${crypto.randomUUID()}`;
+      const hadSelectedFiles = selectedEvidenceFiles.length > 0;
 
-    const caseId = `CT-${now.getTime().toString().slice(-8)}`;
+      // Private cloud evidence storage is not wired yet. Files are stored locally only in Demo Mode.
+      const attachments = !userId && hadSelectedFiles
+        ? await saveEvidenceFiles(caseId, selectedEvidenceFiles)
+        : [];
 
-const attachments = selectedEvidenceFiles.length
-  ? await saveEvidenceFiles(caseId, selectedEvidenceFiles)
-  : [];
+      const initialEvent = {
+        id: `${now.getTime()}-created`,
+        date: now.toISOString(),
+        title: "Personal record created",
+        details: userId
+          ? "Complaint record saved to the ClearTrail cloud account."
+          : "Complaint details saved on this device.",
+      };
 
-const initialEvent = {
-  id: `${now.getTime()}-created`,
-  date: now.toISOString(),
-  title: "Personal record created",
-  details: "Complaint details saved on this device.",
-};
+      const timelineEvents = [initialEvent];
 
-const timelineEvents = [initialEvent];
+      if (attachments.length > 0) {
+        timelineEvents.push({
+          id: `${now.getTime()}-evidence`,
+          date: now.toISOString(),
+          title: "Evidence files attached",
+          details: `Stored ${attachments.length} file(s): ${attachments
+            .map((file) => file.name)
+            .join(", ")}.`,
+        });
+      }
 
-if (attachments.length > 0) {
-  timelineEvents.push({
-    id: `${now.getTime()}-evidence`,
-    date: now.toISOString(),
-    title: "Evidence files attached",
-    details: `Stored ${attachments.length} file(s): ${attachments
-      .map((file) => file.name)
-      .join(", ")}.`,
-  });
-}
+      const hashedEvents = await buildHashChain(timelineEvents);
 
-const hashedEvents = await buildHashChain(timelineEvents);
+      if (userId) {
+        console.log("ClearTrail ID being inserted:", caseId);
 
-const newCase = {
-  ...formData,
-  id: caseId,
-  status: "Personal record saved",
-  createdAt: now.toLocaleDateString("en-IN"),
-  isDemo: false,
-  events: hashedEvents,
-  attachments,
-};
+        const { error: complaintError } = await supabase
+          .from("complaints")
+          .upsert(
+            {
+              id: caseId,
+              owner_id: userId,
+              title: formData.title.trim(),
+              category: formData.category,
+              authority: formData.authority.trim(),
+              location: formData.location.trim(),
+              incident_date: formData.incidentDate || null,
+              description: formData.description.trim(),
+              follow_up_date: formData.deadline || null,
+              status: "Personal record saved",
+              evidence_checklist: formData.evidence ?? [],
+            },
+            { onConflict: "id" }
+          );
 
-    setSavedCases((previous) => [newCase, ...previous]);
-    setFormData(EMPTY_FORM);
-    setSelectedEvidenceFiles([]);
-    setNotice("Your complaint record was saved on this device.");
-    setSelectedCase(newCase);
-    setView("details");
-  } catch (error) {
-    console.error("Timeline hashing failed:", error);
+        if (complaintError) throw complaintError;
 
-    window.alert(
-      "Could not create the timeline hash. Please try again."
-    );
+        const databaseEvents = hashedEvents.map((item) => ({
+          id: item.id,
+          case_id: caseId,
+          owner_id: userId,
+          event_date: item.date,
+          title: item.title,
+          details: item.details,
+          previous_hash: item.previousHash,
+          hash: item.hash,
+        }));
+
+        const { error: eventsError } = await supabase
+          .from("case_events")
+          .insert(databaseEvents);
+
+        if (eventsError) {
+          console.error("Cloud timeline save failed; rolling back complaint:", eventsError);
+          const { error: rollbackError } = await supabase
+            .from("complaints")
+            .delete()
+            .eq("id", caseId)
+            .eq("owner_id", userId);
+
+          if (rollbackError) {
+            console.error("Could not roll back partially saved complaint:", rollbackError);
+          }
+
+          throw new Error(
+            `The complaint timeline could not be saved to the cloud: ${eventsError.message}`
+          );
+        }
+      }
+
+      const newCase = {
+        ...formData,
+        id: caseId,
+        status: "Personal record saved",
+        createdAt: now.toLocaleDateString("en-IN"),
+        isDemo: false,
+        events: hashedEvents,
+        attachments,
+      };
+      setSavedCases((previous) => [newCase, ...previous]);
+      setFormData(EMPTY_FORM);
+      setSelectedEvidenceFiles([]);
+      setNotice(
+        userId
+          ? hadSelectedFiles
+            ? "Complaint and timeline saved to the cloud. Evidence file uploads are not connected yet, so selected files were not stored."
+            : "Complaint and timeline saved to your ClearTrail cloud account."
+          : "Your complaint record was saved on this device."
+      );
+      setSelectedCase(newCase);
+      setView("details");
+    } catch (error) {
+      console.error("Complaint save failed:", error);
+      setNotice(error.message || "Could not save the complaint. Please try again.");
+    }
   }
-}
- async function addCaseEvent(event) {
+
+  async function addCaseEvent(event) {
   event.preventDefault();
 
   if (!selectedCase || selectedCase.isDemo) return;
@@ -545,6 +703,25 @@ const newCase = {
       ...existingEvents,
       newEvent,
     ]);
+
+    if (userId) {
+      const databaseEvents = updatedEvents.map((item) => ({
+        id: item.id,
+        case_id: selectedCase.id,
+        owner_id: userId,
+        event_date: item.date,
+        title: item.title,
+        details: item.details,
+        previous_hash: item.previousHash,
+        hash: item.hash,
+      }));
+
+      const { error: syncError } = await supabase
+        .from("case_events")
+        .upsert(databaseEvents);
+
+      if (syncError) throw syncError;
+    }
 
     const updatedCase = {
       ...selectedCase,
@@ -1619,8 +1796,9 @@ function restoreTimelineAfterDemo() {
               <strong>Prototype limitations</strong>
               <span>
                 This prototype does not connect to government databases, verify
-                official case status, or send complaints. Demo cases are
-                simulated. Saved records are stored in your browser.
+                official case status, or submit complaints. Demo cases are
+                simulated. Signed-in complaint records and timeline events use
+                your ClearTrail Supabase account; evidence files are not cloud-uploaded yet.
               </span>
             </div>
           </section>
