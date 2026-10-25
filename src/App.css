@@ -1708,3 +1708,87 @@ h4 {
 .integrity-result p {
   margin: 6px 0 0;
 }
+/* ===== Evidence attachments ===== */
+
+.evidence-upload-block {
+  margin-top: 26px;
+  padding: 20px;
+  border: 1px dashed #c9d6f0;
+  border-radius: 15px;
+  background: #f8faff;
+}
+
+.evidence-upload-block input[type="file"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid #d5dfef;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #30466a;
+}
+
+.attachment-list {
+  padding-left: 20px;
+  color: #30466a;
+  line-height: 1.9;
+  overflow-wrap: anywhere;
+}
+
+.evidence-files-section {
+  margin: 28px 0;
+  padding: 26px;
+  border: 1px solid #e0e8f8;
+  border-radius: 22px;
+  background: #ffffff;
+}
+
+.evidence-files-section h2 {
+  color: #20365f;
+}
+
+.saved-attachment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.saved-attachment-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 15px;
+  border: 1px solid #e4eaf6;
+  border-radius: 13px;
+  background: #f8faff;
+}
+
+.saved-attachment-list li > span {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.saved-attachment-list strong {
+  color: #20365f;
+}
+
+.saved-attachment-list small {
+  color: #7182a5;
+}
+
+@media (max-width: 600px) {
+  .evidence-files-section {
+    padding: 18px;
+  }
+
+  .saved-attachment-list li {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

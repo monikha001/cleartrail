@@ -149,6 +149,107 @@ async function verifyHashChain(events) {
     message: "All hashed timeline events passed verification.",
   };
 }
+const EVIDENCE_DB_NAME = "ClearTrailEvidence";
+const EVIDENCE_STORE_NAME = "attachments";
+
+function openEvidenceDB() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) {
+      reject(new Error("Browser evidence storage is unavailable."));
+      return;
+    }
+
+    const request = window.indexedDB.open(EVIDENCE_DB_NAME, 1);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+
+      if (!db.objectStoreNames.contains(EVIDENCE_STORE_NAME)) {
+        db.createObjectStore(EVIDENCE_STORE_NAME, {
+          keyPath: "id",
+        });
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function saveEvidenceFiles(caseId, files) {
+  const db = await openEvidenceDB();
+  const createdAt = new Date().toISOString();
+
+  const attachments = files.map((file, index) => ({
+    id: `${caseId}-${Date.now()}-${index}`,
+    caseId,
+    name: file.name,
+    type: file.type || "application/octet-stream",
+    size: file.size,
+    addedAt: createdAt,
+    blob: file,
+  }));
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(
+      EVIDENCE_STORE_NAME,
+      "readwrite"
+    );
+
+    const store = transaction.objectStore(EVIDENCE_STORE_NAME);
+
+    attachments.forEach((attachment) => {
+      store.put(attachment);
+    });
+
+    transaction.oncomplete = () => {
+      db.close();
+
+      resolve(
+        attachments.map(({ blob, ...metadata }) => metadata)
+      );
+    };
+
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error);
+    };
+
+    transaction.onabort = () => {
+      db.close();
+      reject(transaction.error || new Error("Evidence saving was cancelled."));
+    };
+  });
+}
+
+async function loadEvidenceFiles(caseId) {
+  const db = await openEvidenceDB();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(
+      EVIDENCE_STORE_NAME,
+      "readonly"
+    );
+
+    const request = transaction
+      .objectStore(EVIDENCE_STORE_NAME)
+      .getAll();
+
+    request.onsuccess = () => {
+      resolve(
+        request.result.filter((item) => item.caseId === caseId)
+      );
+    };
+
+    request.onerror = () => reject(request.error);
+
+    transaction.oncomplete = () => db.close();
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error);
+    };
+  });
+}
 function loadSavedCases() {
   try {
     const stored = localStorage.getItem("cleartrailSavedCases");
@@ -162,6 +263,9 @@ function App() {
   const [view, setView] = useState("home");
   const [savedCases, setSavedCases] = useState(loadSavedCases);
   const [formData, setFormData] = useState(EMPTY_FORM);
+  const [selectedEvidenceFiles, setSelectedEvidenceFiles] = useState([]);
+const [caseAttachments, setCaseAttachments] = useState([]);
+const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [selectedCase, setSelectedCase] = useState(null);
   const [notice, setNotice] = useState("");
   const [eventTitle, setEventTitle] = useState(
@@ -185,6 +289,34 @@ const [actionDraft, setActionDraft] = useState("");
   setTamperDemoActive(false);
   setIntegrityResult(null);
 }, [selectedCase?.id]);
+ useEffect(() => {
+  let active = true;
+
+  if (!selectedCase?.id || selectedCase.isDemo) {
+    setCaseAttachments([]);
+    setEvidenceLoading(false);
+    return;
+  }
+
+  setEvidenceLoading(true);
+
+  loadEvidenceFiles(selectedCase.id)
+    .then((files) => {
+      if (active) setCaseAttachments(files);
+    })
+    .catch((error) => {
+      console.error("Could not load evidence files:", error);
+
+      if (active) setCaseAttachments([]);
+    })
+    .finally(() => {
+      if (active) setEvidenceLoading(false);
+    });
+
+  return () => {
+    active = false;
+  };
+}, [selectedCase?.id, selectedCase?.isDemo]);
 
   function updateField(event) {
     const { name, value } = event.target;
@@ -194,7 +326,42 @@ const [actionDraft, setActionDraft] = useState("");
       [name]: value,
     }));
   }
+   function handleEvidenceFileSelection(event) {
+  const chosen = Array.from(event.target.files || []);
+  const limited = chosen.slice(0, 5);
+  const maxBytes = 10 * 1024 * 1024;
 
+  if (chosen.length > 5) {
+    window.alert("Please choose no more than 5 files.");
+  }
+
+  const validFiles = limited.filter((file) => file.size <= maxBytes);
+
+  if (validFiles.length < limited.length) {
+    window.alert("Each evidence file must be 10 MB or smaller.");
+  }
+
+  setSelectedEvidenceFiles(validFiles);
+}
+
+function downloadEvidenceFile(attachment) {
+  if (!attachment?.blob) {
+    window.alert("This attachment is not available in local browser storage.");
+    return;
+  }
+
+  const url = URL.createObjectURL(attachment.blob);
+  const link = document.createElement("a");
+
+  link.href = url;
+  link.download = attachment.name || "evidence-file";
+
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
   function toggleEvidence(item) {
     setFormData((previous) => ({
       ...previous,
@@ -210,27 +377,47 @@ const [actionDraft, setActionDraft] = useState("");
   try {
     const now = new Date();
 
-    const initialEvent = {
-      id: `${now.getTime()}-created`,
-      date: now.toISOString(),
-      title: "Personal record created",
-      details: "Complaint details saved on this device.",
-    };
+    const caseId = `CT-${now.getTime().toString().slice(-8)}`;
 
-    // Create a SHA-256 hash for the first timeline event.
-    const hashedEvents = await buildHashChain([initialEvent]);
+const attachments = selectedEvidenceFiles.length
+  ? await saveEvidenceFiles(caseId, selectedEvidenceFiles)
+  : [];
 
-    const newCase = {
-      ...formData,
-      id: `CT-${now.getTime().toString().slice(-8)}`,
-      status: "Personal record saved",
-      createdAt: now.toLocaleDateString("en-IN"),
-      isDemo: false,
-      events: hashedEvents,
-    };
+const initialEvent = {
+  id: `${now.getTime()}-created`,
+  date: now.toISOString(),
+  title: "Personal record created",
+  details: "Complaint details saved on this device.",
+};
+
+const timelineEvents = [initialEvent];
+
+if (attachments.length > 0) {
+  timelineEvents.push({
+    id: `${now.getTime()}-evidence`,
+    date: now.toISOString(),
+    title: "Evidence files attached",
+    details: `Stored ${attachments.length} file(s): ${attachments
+      .map((file) => file.name)
+      .join(", ")}.`,
+  });
+}
+
+const hashedEvents = await buildHashChain(timelineEvents);
+
+const newCase = {
+  ...formData,
+  id: caseId,
+  status: "Personal record saved",
+  createdAt: now.toLocaleDateString("en-IN"),
+  isDemo: false,
+  events: hashedEvents,
+  attachments,
+};
 
     setSavedCases((previous) => [newCase, ...previous]);
     setFormData(EMPTY_FORM);
+    setSelectedEvidenceFiles([]);
     setNotice("Your complaint record was saved on this device.");
     setSelectedCase(newCase);
     setView("details");
@@ -867,7 +1054,33 @@ function restoreTimelineAfterDemo() {
                   </label>
                 ))}
               </fieldset>
+              <div className="evidence-upload-block">
+  <label className="form-field">
+    Attach evidence files (optional)
+    <input
+      key={view}
+      type="file"
+      multiple
+      accept="image/*,.pdf,.txt,.doc,.docx"
+      onChange={handleEvidenceFileSelection}
+    />
+  </label>
 
+  <p className="privacy-note">
+    Up to 5 files, 10 MB each. Files are stored in this browser on this
+    device, not uploaded to a server.
+  </p>
+
+  {selectedEvidenceFiles.length > 0 && (
+    <ul className="attachment-list">
+      {selectedEvidenceFiles.map((file, index) => (
+        <li key={`${file.name}-${file.lastModified}-${index}`}>
+          {file.name} · {(file.size / 1024).toFixed(0)} KB
+        </li>
+      ))}
+    </ul>
+  )}
+</div>
               <div className="form-actions">
                 <button
                   type="button"
@@ -1000,6 +1213,39 @@ function restoreTimelineAfterDemo() {
               This is a personal record in the local browser, not proof that an
               official complaint was submitted or accepted.
             </p>
+            <section className="evidence-files-section">
+  <p className="eyebrow">ATTACHED EVIDENCE</p>
+  <h2>Evidence files</h2>
+
+  {evidenceLoading ? (
+    <p>Loading attachments...</p>
+  ) : caseAttachments.length > 0 ? (
+    <ul className="saved-attachment-list">
+      {caseAttachments.map((attachment) => (
+        <li key={attachment.id}>
+          <span>
+            <strong>{attachment.name}</strong>
+            <small>
+              {(attachment.size / 1024).toFixed(0)} KB
+            </small>
+          </span>
+
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => downloadEvidenceFile(attachment)}
+          >
+            Download ↓
+          </button>
+        </li>
+      ))}
+    </ul>
+  ) : (
+    <p className="privacy-note">
+      No files are attached to this complaint yet.
+    </p>
+  )}
+</section>
             <section className="action-pack-section">
   <p className="eyebrow">READY FOR YOUR NEXT STEP</p>
   <h2>Action Pack</h2>
